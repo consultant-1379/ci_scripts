@@ -1,0 +1,1324 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2001 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : manage_snapshot.bsh
+# Date    : 13/03/2012
+# Revision: A
+# Purpose : A wrapper script around the 3 main snapshot scripts -
+# 			manage_nas_snapshots.bsh, manage_san_snapshots.bsh and manage_zfs_snapshots.bsh
+#			Instead of executing three seperate scripts, just execute this one 
+#
+# Usage   : manage_snapshots.bsh -a <snap_action> -n <snap_name> 
+#			 [ -N ] [ -l <logfile> ]
+#
+# ********************************************************************
+#
+#   Command Section
+#
+# ********************************************************************
+AWK=/usr/bin/awk
+BASENAME=/usr/bin/basename
+BC=/usr/bin/bc
+CAT=/usr/bin/cat
+CHMOD=/usr/bin/chmod
+CLEAR=/usr/bin/clear
+CMP=/usr/bin/cmp
+CP=/usr/bin/cp
+CUT=/usr/bin/cut
+DATE=/usr/bin/date
+DF=/usr/bin/df
+DIRNAME=/usr/bin/dirname
+DOMAINNAME=/usr/bin/domainname
+DTCONFIG=/usr/dt/bin/dtconfig
+ECHO=/usr/bin/echo
+EGREP=/usr/bin/egrep
+EJECT=/usr/bin/eject
+ENV=/usr/bin/env
+EXPR=/usr/bin/expr
+FORMAT=/usr/sbin/format
+FSTYP=/usr/sbin/fstyp
+FUSER=/usr/sbin/fuser
+GEGREP=/usr/sfw/bin/gegrep
+GETENT=/usr/bin/getent
+GETTEXT=/usr/bin/gettext
+GREP=/usr/bin/grep
+GTAR=/usr/sfw/bin/gtar
+GZCAT=/usr/bin/gzcat
+HEAD=/usr/bin/head
+HOSTID=/usr/bin/hostid
+HOSTNAME=/usr/bin/hostname
+ID=/usr/bin/id
+INIT=/usr/sbin/init
+LS=/usr/bin/ls
+MKDIR=/usr/bin/mkdir
+MORE=/usr/bin/more
+MV=/usr/bin/mv
+NAWK=/usr/bin/nawk
+PGREP=/usr/bin/pgrep
+PING=/usr/sbin/ping
+PKGADD=/usr/sbin/pkgadd
+PKGINFO=/usr/bin/pkginfo
+PRTCONF=/usr/sbin/prtconf
+PRTVTOC=/usr/sbin/prtvtoc
+PSRINFO=/usr/sbin/psrinfo
+PWD=/usr/bin/pwd
+RM=/usr/bin/rm
+RCP=/usr/bin/rcp
+ROLES=/usr/bin/roles
+RSH=/usr/bin/rsh
+SED=/usr/bin/sed
+SLEEP=/usr/bin/sleep
+SORT=/usr/bin/sort
+SU=/usr/bin/su
+SVCADM=/usr/sbin/svcadm
+SVCCFG=/usr/sbin/svccfg
+SVCS=/usr/bin/svcs
+SYNC=/usr/sbin/sync
+TAIL=/usr/bin/tail
+TEE=/usr/bin/tee
+TOUCH=/usr/bin/touch
+TPUT=/usr/bin/tput
+UADMIN=/usr/sbin/uadmin
+UNAME=/usr/bin/uname
+UNIQ=/usr/bin/uniq
+VOLD=/usr/sbin/vold
+WC=/usr/bin/wc
+ZFS=/usr/sbin/zfs
+ZPOOL=/usr/sbin/zpool
+
+
+# ********************************************************************
+#
+#       Configuration Section
+#
+# ********************************************************************
+ENIQ_ENV=niq.rc
+ENIQ_INI=niq.ini
+SYM_INI=sym_links.ini
+DWH_INI=dwh.ini
+SUNOS_INI=SunOS.ini
+STORAGE_INI=storage.ini
+NAS_SNAP=manage_nas_snapshots.bsh
+SAN_SNAP=manage_san_snapshots.bsh
+ZFS_SNAP=manage_zfs_snapshots.bsh
+CLEANUP_SNAP=cleanup_eniq_backup.bsh
+ROLLBACK_ARCHIVE=rollback_archive_data.bsh
+OPENLDAP_BACKUP=ldap_backup.bsh
+REPDB_RESTORE=repdb_restore.bsh
+POST_ROLLBACK=post_rollback.bsh
+MAX_SNAP_LABEL_LENGTH=6
+SMF_ID_COMMON_STR=svc:/eniq
+# Number of stages in Rollback
+NUM_REST_STAGE=6
+# Eniq service identifiers. STOP & START order
+#ENIQ_STOP_SERVICES="ec dbmon glassfish controlzone scheduler engine webserver dwh_reader dwhdb repdb connectd licmgr"
+#ENIQ_START_SERVICES="licmgr connectd repdb dwhdb dwh_reader webserver engine scheduler controlzone glassfish dbmon ec"
+MANAGED_STR="ENIQ"
+
+# SENTINEL SERVICE
+SENTINEL_SMF_ID="svc:/licensing/sentinel"
+
+# NASd SERVICE
+NASd_SMF_ID="svc:/storage/NASd:default"
+
+# NAS MILESTONE
+NAS_MILESTONE_SMF_ID="svc:/milestone/NAS-online:default"
+
+# Hostsync Service
+HOSTSYNC_SMF_ID="svc:/application/management/hostsync:default"
+
+# Open LDAP Service
+OPEN_LDAP_SMF_ID="svc:/network/ldap/openLDAP:default"
+
+# DDC Service
+DDC_SMF_ID="svc:/ericsson/eric_monitor/ddc:default"
+
+#Roll-snap service
+ROLL_SMF_ID="svc:/eniq/roll-snap:default"
+
+# ********************************************************************
+#
+#       Pre-execution Operations
+#
+# ********************************************************************
+
+
+# ********************************************************************
+#
+#   functions
+#
+# ********************************************************************
+
+### Function: abort_script ###
+#
+#   This will is called if the script is aborted thru an error
+#   error signal sent by the kernel such as CTRL-C or if a serious
+#   error is encountered during runtime
+#
+# Arguments:
+#       $1 - Error message from part of program (Not always used)
+# Return Values:
+#       none
+abort_script()
+{
+if [ "$1" ]; then
+    _err_msg_=$1
+else
+    _err_msg_="Script aborted.......\n"
+fi
+
+# Check if log_msg() is defined
+type log_msg > /dev/null 2>&1
+if [ $? -gt 0 ]; then
+    if [ "${LOGFILE}" ]; then
+        if [ ! "${SNAP_QUIET}" ]; then
+            $ECHO "\n${_err_msg_}\n" |$TEE -a ${LOGFILE}
+        else
+            $ECHO "\n${_err_msg_}\n" >> ${LOGFILE}
+        fi
+    else
+        $ECHO "\n${_err_msg_}\n"
+    fi
+else
+    if [ "${LOGFILE}" ]; then
+    log_msg -s "\n${_err_msg_}\n" -l ${LOGFILE} ${SNAP_QUIET}
+    else
+    log_msg -s "\n${_err_msg_}\n" ${SNAP_QUIET}
+    fi
+fi
+
+cd $SCRIPTHOME
+
+if [ "$2" ]; then
+    ${2}
+else
+   exit 1
+fi
+}
+
+# Check/Create Logfile
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+chk_create_logfile()
+{
+$MKDIR -p `$DIRNAME ${LOGFILE}`
+if [ $? -ne 0 ]; then
+    _err_msg_="Could not create directory `$DIRNAME ${LOGFILE}`"
+     abort_script "$_err_msg_"
+fi
+
+$TOUCH -a ${LOGFILE}
+if [ $? -ne 0 ]; then
+    _err_msg_="Could not write to file ${LOGFILE}"
+    abort_script "$_err_msg_"
+fi
+
+_log_id_str="-l ${LOGFILE}"
+}
+
+### Function: check_id ###
+#
+#   Check that the effective id of the user is correct
+#   If not print error msg and exit.
+#
+# Arguments:
+#       $1 : User ID name
+# Return Values:
+#       none
+check_id()
+{
+_check_id_=`$ID  | $AWK -F\( '{print $2}' | $AWK -F\) '{print $1}'`
+if [ "$_check_id_" != "$1" ]; then
+    _err_msg_="You must be $1 or have equal permissions to execute this script."
+    abort_script "$_err_msg_"
+fi
+}
+
+### Function: check_params ###
+#
+# Check Input Params
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+check_params()
+{
+# Must have SNAP_ACTION
+if [  ! "${SNAP_ACTION}" ]; then
+    usage_msg
+    exit 1
+fi
+
+if [ "${SNAP_ACTION}" == "rollback" ]; then
+	if [  ! "${SNAP_NAME}" ]; then
+			usage_msg
+			exit 1
+	fi	
+fi
+
+ 
+case "${SNAP_ACTION}" in
+    create)             SNAP_OPT=snapshot
+                        ;;
+    delete)     		SNAP_OPT=destroy
+                        ;;
+    list)               SNAP_OPT=list
+                        ;;
+    rollback)   		SNAP_OPT=rollback
+                        ;;
+    *)                  usage_msg
+                        exit 1
+                        ;;
+esac
+
+# Check that the length of the snap label does not exceed max number of characters
+
+_snap_label_length_=`$ECHO "${#SNAP_NAME}"`
+
+if [ ${_snap_label_length_} -gt ${MAX_SNAP_LABEL_LENGTH} ]; then
+    _err_msg_="<snap_label> cannot be greater than ${MAX_SNAP_LABEL_LENGTH} characters, you used ${_snap_label_length_}"
+    abort_script "$_err_msg_"
+fi
+
+}
+
+### Function: check_services ### 
+#
+# Function to check status of Services
+#
+# Arguments:
+#   $1 : create/rollback
+# Return Values:
+#   none
+check_services()
+{
+$RM -rf ${TEM_DIR}/eniq_service_list
+	
+_server_list_=""
+
+$CAT $ENIQ_ADMIN_DIR/etc/smf_contract_config | $EGREP "${CURR_SERVER_TYPE}" | $EGREP "ENIQ" > $TEM_DIR/service_list.$$.$$
+if [ ! -s $TEM_DIR/service_list.$$.$$ ]; then
+    _err_msg_="Could not get a list of services for this server"
+    abort_script "$_err_msg_" 
+fi
+
+while read _line_; do
+    _service_name_=`$ECHO ${_line_} | $NAWK -F"::" '{print $3}'`
+    _use_service_=`$ECHO ${_line_} | $NAWK -F"::" '{print $4}'`
+    if [ "${_use_service_}" == "Y" ]; then
+		if [ "${_server_list_}" == "" ]; then
+            _server_list_=${_service_name_}
+		else
+            _server_list_="${_server_list_} ${_service_name_}"
+		fi
+    fi
+done < $TEM_DIR/service_list.$$.$$
+
+for _eniq_service_ in ${_server_list_}; do 
+    _service_=`$SVCS -a | $EGREP "${SMF_ID_COMMON_STR}\/${_eniq_service_}\:" | $EGREP online`
+    if [ "${_service_}" ]; then 
+        $ECHO ${_service_} >> ${TEM_DIR}/eniq_service_list
+    fi
+done  
+
+if [ -s ${TEM_DIR}/eniq_service_list ]; then
+    $CAT ${TEM_DIR}/eniq_service_list
+    _err_msg_="ENIQ services are online\nCannot $1 snapshot"
+    abort_script "$_err_msg_" 
+fi
+}
+
+### Function: chk_scripts_exist ###
+#
+# Check that the 3 required snapshot scripts exist
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+chk_scripts_exist()
+{
+if [ ! -s ${ENIQ_BKUP_DIR}/${NAS_SNAP} -o ! -s ${ENIQ_BKUP_DIR}/${SAN_SNAP} -o ! -s ${ENIQ_BKUP_DIR}/${ZFS_SNAP} -o ! -s ${ENIQ_BKUP_DIR}/${CLEANUP_SNAP} ]; then
+
+	_err_msg_="All required snapshot scripts ${NAS_SNAP}, ${SAN_SNAP}, ${ZFS_SNAP} ,${CLEANUP_SNAP} not found in ${ENIQ_BKUP_DIR}"
+	abort_script "$_err_msg_"
+fi
+}
+
+# Create required Snapshots
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+create_snapshots()
+{
+#log_msg -s "Checking status of ENIQ services" ${_log_id_str}
+#check_services create
+#log_msg -s "Creating snapshots with label ${SNAP_NAME} for NAS,SAN,ZFS storage type(s)" ${_log_id_str}
+ $ECHO "\n Starting  $ENIQ_BKUP_DIR/prepare_eniq_bkup.bsh at `$DATE +%d.%m.%y_%H:%M:%S`" | $TEE -a ${LOGFILE}
+ if [ !$SNAP_QUIET ] ;then
+	${BASH} $ENIQ_BKUP_DIR/prepare_eniq_bkup.bsh -N -R -l ${LOGFILE}
+else
+	${BASH} $ENIQ_BKUP_DIR/prepare_eniq_bkup.bsh -N -R -q -l ${LOGFILE}
+fi
+if [ $? -ne 0 ]; then
+	log_msg -s "\n prepare_eniq_bkup failed ,check the backup logs for more information"  ${_log_id_str}
+else
+	log_msg -s "\n Successfully finished $ENIQ_BKUP_DIR/prepare_eniq_bkup.bsh" ${_log_id_str}
+fi
+}
+
+# Create NAS snapshots
+#
+# Arguments: 
+#   none
+# Return Values:
+#   none
+create_nas_snapshots()
+{
+
+log_msg -s "Creating NAS snapshots with label ${SNAP_NAME} " ${_log_id_str}
+$ENIQ_BKUP_DIR/$NAS_SNAP -a create -f ALL -n ${SNAP_NAME} -N
+
+if [ $? -ne 0 ]; then
+	_err_msg_="Failed to create NAS snapshots with label ${SNAP_NAME}"
+	abort_script "$_err_msg_" "${EXEC_SHELL_CMD}"
+else
+	log_msg -s "Successfully created NAS snapshots with label ${SNAP_NAME}" ${_log_id_str}
+fi	
+
+}
+# Create SAN snapshots
+#
+# Arguments: 
+#   none
+# Return Values:
+#   none
+create_san_snapshots()
+{
+
+log_msg -s "Creating SAN snapshots with label ${SNAP_NAME} " ${_log_id_str}
+$ENIQ_BKUP_DIR/$SAN_SNAP -a create -f ALL -n ${SNAP_NAME} -N
+
+if [ $? -ne 0 ]; then
+	_err_msg_="Failed to create SAN snapshots with label ${SNAP_NAME}"
+	abort_script "$_err_msg_" "${EXEC_SHELL_CMD}"
+else
+	log_msg -s "Successfully created SAN snapshots with label ${SNAP_NAME}" ${_log_id_str}
+
+fi	
+
+}
+# Create ZFS snapshots
+#
+# Arguments: 
+#   none
+# Return Values:
+#   none
+create_zfs_snapshots()
+{
+
+log_msg -s "Creating ZFS snapshots with label ${SNAP_NAME} " ${_log_id_str}
+$ENIQ_BKUP_DIR/$ZFS_SNAP -a create -f ALL -n ${SNAP_NAME} -N -S -q -l ${LOGFILE} 
+
+if [ $? -ne 0 ]; then
+	_err_msg_="Failed to create ZFS snapshots with label ${SNAP_NAME}"
+	abort_script "$_err_msg_" "${EXEC_SHELL_CMD}"
+else
+	log_msg -s "Successfully created ZFS snapshots with label ${SNAP_NAME}" ${_log_id_str}
+
+fi	
+
+}
+
+# destroy_snapshots
+#
+# Arguments: 
+#  SNAP_NAME
+# Return Values:
+#   none
+destroy_snapshots()
+{
+log_msg -s "Deleting snapshot with snap name $SNAP_NAME " ${_log_id_str}
+if [ ! "${SNAP_NAME}" ] ; then
+	$ENIQ_BKUP_DIR/$CLEANUP_SNAP  -R 
+else
+	$ENIQ_BKUP_DIR/$CLEANUP_SNAP  -R  -S ${SNAP_NAME}
+fi
+if [ $? -ne 0 ]; then
+	log_msg -s "Failed to delete snapshot ${SNAP_NAME}" ${_log_id_str}
+else
+	log_msg -s "Successfully deleted snapshots with label ${SNAP_NAME}" ${_log_id_str}
+fi
+}
+
+### Function: get_absolute_path ###
+#
+# Determine absolute path to software
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+get_absolute_path() 
+{
+_dir_=`$DIRNAME $0`
+SCRIPTHOME=`cd $_dir_ 2>/dev/null && pwd || $ECHO $_dir_`
+}
+### Function: get_next_stage ###
+#
+# Get the stage to be run
+#
+# Arguments:
+#   $1 : Stage to be set to. Either numeric value or 'done'
+# Return Values:
+#   none
+get_next_stage()
+{
+if [ -s ${STAGEFILE} ]; then
+    NEXT_STAGE=`$CAT ${STAGEFILE}|$EGREP -v '^[ 	]*#' |$EGREP  '^[ 	]*([1-9]+|done)'`
+    if [ $? -ne 0  ]; then
+        _err_msg_="Failed to read stage from ${STAGEFILE}, exiting."
+        abort_script "$_err_msg_" "${EXEC_SHELL_CMD}"
+    fi
+    if [ "$NEXT_STAGE" == "done" ]; then
+        return 0
+    else
+        $ECHO $NEXT_STAGE | $EGREP '[^0-9]' >> /dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            _err_msg_="Non-Numeric value read from stage file\n$STAGEFILE"
+            abort_script "$_err_msg_" "${EXEC_SHELL_CMD}"
+        fi
+        if [ $NEXT_STAGE -lt 1 -o $NEXT_STAGE -gt $NUM_ROLL_STAGE ]; then
+            _err_msg_="Numeric Stage range is 1 - $NUM_ROLL_STAGE."
+            abort_script "$_err_msg_" "${EXEC_SHELL_CMD}"
+        fi        
+    fi
+else
+    $MKDIR -p `$DIRNAME ${STAGEFILE}`
+    if [ $? -ne 0 ]; then
+        _err_msg_="Failed to create directory `$DIRNAME ${STAGEFILE}`, exiting."
+        abort_script "$_err_msg_" "${EXEC_SHELL_CMD}"
+    fi
+		#if [ ! $NEXT_STAGE ] ; then
+			NEXT_STAGE=1
+			
+		#fi
+fi
+}
+
+### Function: get_server_info ###
+#
+# Get server and storage type
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+get_server_info()
+{
+# Determine the current server type
+CURR_SERVER_TYPE=`$CAT $ENIQ_BASE_DIR/installation/config/installed_server_type | $EGREP -v '^[     ]*#' | $SED -e 's/ //g'`
+if [ ! "${CURR_SERVER_TYPE}" ]; then
+        _err_msg_="Could not determine which server type this is"
+    abort_script "$_err_msg_"
+fi
+
+# Source the common functions
+#if [ -s $ENIQ_BASE_DIR/installation/core_install/lib/common_functions.lib ]; then
+#    . $ENIQ_BASE_DIR/installation/core_install/lib/common_functions.lib
+#fi
+
+# Source the common functions
+#if [ -s $ENIQ_BASE_DIR/installation/core_install/lib/common_inirator_functions.lib ]; then
+#   . $ENIQ_BASE_DIR/installation/core_install/lib/common_inirator_functions.lib
+#fi
+
+STORAGE_TYPE=`iniget STOR_TYPE -f $ENIQ_BASE_DIR/installation/config/${SUNOS_INI} -v STORAGE_TYPE`
+if [ ! "${STORAGE_TYPE}" ]; then
+    _err_msg_="Could not read STORAGE_TYPE param "
+    abort_script "$_err_msg_" "${EXEC_SHELL_CMD}"
+fi
+
+if [ "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_events" -o "${CURR_SERVER_TYPE}" == "eniq_iqw" -o "${CURR_SERVER_TYPE}"  == "eniq_stats" -o "${CURR_SERVER_TYPE}" == "stats_coordinator" ]; then
+    _coord_="YES"
+fi
+
+# File containing the type of OSS installation. Eg. events or statistics
+INST_TYPE_FILE=$ENIQ_BASE_DIR/installation/config/ericsson_use_config
+if [ ! -s "${INST_TYPE_FILE}" ]; then
+    _err_msg_="ENIQ install type not defined in ${INST_TYPE_FILE}"
+    abort_script "$_err_msg_"  "${EXEC_SHELL_CMD}"
+fi
+
+# Read the installation type - should be "events" or "stats"
+INSTALL_TYPE=`$CAT ${INST_TYPE_FILE} | $NAWK -F\= '{print $2}'`
+if [ ! "${INSTALL_TYPE}" ]; then
+    _err_msg_="Could not read INSTALL_TYPE param "
+    abort_script "$_err_msg_" "${EXEC_SHELL_CMD}"
+fi
+}
+
+# List Snapshots
+#list_snapshots
+# Arguments:
+#   none
+# Return Values:
+#   none
+list_snapshots()
+{
+#log_msg -s "Listing ${SNAP_NAME} snapshots for NAS,SAN,ZFS storage type(s)" ${_log_id_str}
+
+list_zfs_snapshots
+#Calling relevant  roll back script  for stats/events coordinator/standalone 
+if [ "${CURR_SERVER_TYPE}" == "stats_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_stats" -o "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_events" ]; then 	
+	list_nas_snapshots
+	list_san_snapshots	
+fi	
+}
+# List NAS snapshots
+#list_nas_snapshots
+# Arguments: 
+#   none
+# Return Values:
+#   none
+list_nas_snapshots()
+{
+
+if [ ! "${SNAP_NAME}" ] ; then
+	log_msg -s "Listing NAS snapshots  " ${_log_id_str}
+	$ENIQ_BKUP_DIR/$NAS_SNAP -a list -f ALL  -l ${LOGFILE} 
+else
+ 	log_msg -s "Listing NAS snapshots with label ${SNAP_NAME} " ${_log_id_str}
+	$ENIQ_BKUP_DIR/$NAS_SNAP -a list -f ALL -n ${SNAP_NAME} -l ${LOGFILE} 
+fi
+if [ $? -ne 0 ]; then
+	log_msg -s "No NAS snapshots exist for label ${SNAP_NAME}"
+else
+	log_msg -s "Successfully listed NAS snapshots with label ${SNAP_NAME}" ${_log_id_str}
+fi	
+
+}
+# List SAN snapshots
+#list_san_snapshots
+# Arguments: 
+#   none
+# Return Values:
+#   none
+list_san_snapshots()
+{
+
+if [ ! "${SNAP_NAME}" ] ; then
+	log_msg -s "Listing SAN snapshots  " ${_log_id_str}
+	$ENIQ_BKUP_DIR/$SAN_SNAP -a list -f ALL  -l ${LOGFILE} 
+else
+ 	log_msg -s "Listing SAN snapshots with label ${SNAP_NAME} " ${_log_id_str}
+	$ENIQ_BKUP_DIR/$SAN_SNAP -a list -f ALL -n ${SNAP_NAME} -l ${LOGFILE} 
+fi
+
+if [ $? -ne 0 ]; then
+	log_msg -s "No SAN snapshots exist for label ${SNAP_NAME}" ${_log_id_str}
+else
+	log_msg -s "Successfully listed SAN snapshots with label ${SNAP_NAME}" ${_log_id_str}
+fi	
+
+}
+
+# List ZFS snapshots
+#
+# Arguments: 
+#   none
+# Return Values:
+#   none
+list_zfs_snapshots()
+{
+
+if [ ! "${SNAP_NAME}" ] ; then
+	log_msg -s "Listing ZFS snapshots  " ${_log_id_str}
+	$ENIQ_BKUP_DIR/$ZFS_SNAP -a list -f ALL  -l ${LOGFILE} 
+else
+ 	log_msg -s "Listing ZFS snapshots with label ${SNAP_NAME} " ${_log_id_str}
+	$ENIQ_BKUP_DIR/$ZFS_SNAP -a list -f ALL -n ${SNAP_NAME} -l ${LOGFILE} 
+fi
+
+if [ $? -ne 0 ]; then
+	log_msg -s "No ZFS snapshots exist for label ${SNAP_NAME}" ${_log_id_str}
+else
+	log_msg -s "Successfully listed ZFS snapshots with label ${SNAP_NAME}" ${_log_id_str}
+fi	
+
+}
+
+
+# rollback_snapshots
+#
+# Arguments: 
+#   SNAP_NAME
+# Return Values:
+#   none
+rollback_snapshots()
+{
+
+get_next_stage
+
+# Do required Stages
+if [ ${NEXT_STAGE} != "done" ] ; then 
+	if [ ${NEXT_STAGE} -gt 0 -o ${NEXT_STAGE} -le $NUM_REST_STAGE ]; then
+         case "${NEXT_STAGE}" in
+			1)  rollback_stage_1
+			;;
+
+			2)  rollback_stage_2
+			;;
+
+			3)  rollback_stage_3
+			;;
+
+			4)  rollback_stage_4
+			;;
+
+			5)  rollback_stage_5
+			;;
+
+			6)  rollback_stage_6
+			    
+			;;
+
+			*)  : # SHOULD NOT GET HERE
+			;;
+		esac
+   fi
+else 
+	$ECHO "\n Rollback Stage $NEXT_STAGE seems to be completed  already" | $TEE -a ${LOGFILE}   
+fi   
+
+} 
+# rollback_stage_1
+#check the services and disable them if they are not disabled already
+# Arguments: 
+#   none
+# Return Values:
+#   none
+rollback_stage_1()
+{
+get_next_stage
+# If we read done from the stagefile
+if [ "${NEXT_STAGE}" != "1" ]; then
+    if [ "${NEXT_STAGE}" == "done" ]; then
+        _err_msg_="Current rollback seems to be completed"
+    else
+        _err_msg_="Current rollback seems to be at stage ${NEXT_STAGE}"
+    fi
+    abort_script "$_err_msg_"
+fi
+log_msg -s "Checking status of ENIQ services" ${_log_id_str}
+check_services rollback
+log_msg -s "Starting to roll-back from label ${SNAP_NAME} " ${_log_id_str}
+#Disabling DDC,HOSTSYNC,SENTINEL,ROLL-SNAP
+if [ "${INSTALL_TYPE}" == "events" ]; then
+    if [ "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_events" ]; then
+		smf_list="${DDC_SMF_ID} ${OPEN_LDAP_SMF_ID}  ${ROLL_SMF_ID} ${HOSTSYNC_SMF_ID} "
+	else
+		smf_list="${DDC_SMF_ID}  ${ROLL_SMF_ID} ${HOSTSYNC_SMF_ID} "
+	fi
+fi
+	
+for _smf_ in ${smf_list}; do
+	log_msg -s "Disabling service ${_smf_}" ${_log_id_str}
+    $SVCADM clear ${_smf_} >> /dev/null 2>&1
+    $SVCADM disable -s ${_smf_} >> /dev/null 2>&1
+done
+$ECHO "\nRestore Stage $NEXT_STAGE completed at `$DATE +%d.%m.%y_%H:%M:%S`" | $TEE -a ${LOGFILE}
+$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+set_next_stage 2
+rollback_snapshots
+}
+
+# rollback_stage_2
+#rollback_zfs_snapshots
+# Arguments: 
+#   SNAP_NAME
+# Return Values:
+#   none
+rollback_stage_2()
+{
+get_next_stage
+# If we read done from the stagefile
+if [ "${NEXT_STAGE}" != "2"  ]; then
+    if [ "${NEXT_STAGE}" = "done" ]; then
+        _err_msg_="Current rollback seems to be completed"
+    else
+        _err_msg_="Current rollback seems to be at stage ${NEXT_STAGE}"
+    fi
+    abort_script "$_err_msg_"
+else
+    $ECHO "\n Starting to Rollback ZFS snapshot at `$DATE +%d.%m.%y_%H:%M:%S`" | $TEE -a ${LOGFILE}	
+fi
+if [ ! "${NO_CONFIRM}" ]; then
+	${BASH} $ENIQ_BKUP_DIR/$ZFS_SNAP -a rollback -f ALL=${SNAP_NAME} -l ${LOGFILE} 
+else
+	${BASH} $ENIQ_BKUP_DIR/$ZFS_SNAP -a rollback -f ALL=${SNAP_NAME} -l ${LOGFILE} -N
+fi	
+if [ $? -ne 0 ]; then
+    _err_msg_="Could not rollback ZFS file systems"
+    abort_script "$_err_msg_"
+fi
+#Re-mount ZFS filesystems
+$ZFS mount -a 
+$ECHO "\nRollback Stage $NEXT_STAGE completed at `$DATE +%d.%m.%y_%H:%M:%S`" | $TEE -a ${LOGFILE}
+$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+set_next_stage 3
+rollback_snapshots
+}
+
+#rollback_stage_3 
+#rollback_san_snapshots
+# Arguments: 
+#   SNAP_NAME
+# Return Values:
+#   none
+rollback_stage_3()
+{
+get_next_stage
+# If we read done from the stagefile
+if [ "${NEXT_STAGE}" != "3" ]; then
+    if [ "${NEXT_STAGE}" = "done" ]; then
+        _err_msg_="Current rollback seems to be completed"
+    else
+        _err_msg_="Current rollback seems to be at stage ${NEXT_STAGE}"
+    fi
+    abort_script "$_err_msg_"
+else
+    $ECHO "\n Starting to Rollback SAN snapshot at `$DATE +%d.%m.%y_%H:%M:%S`" | $TEE -a ${LOGFILE}	
+fi
+if [ "${STORAGE_TYPE}" != "zfs" ]; then
+	#Calling relevant SAN roll back script  for stats/events coordinator/standalone 
+	if [ "${CURR_SERVER_TYPE}" == "stats_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_stats" -o "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_events" ]; then 
+		if [ ! "${NO_CONFIRM}" ]; then
+			${BASH} $ENIQ_BKUP_DIR/$SAN_SNAP -a rollback -f ALL -n ${SNAP_NAME} -l ${LOGFILE}
+		else
+			${BASH} $ENIQ_BKUP_DIR/$SAN_SNAP -a rollback -f ALL -n ${SNAP_NAME} -l ${LOGFILE} -N
+		fi	
+		if [ $? -ne 0 ]; then
+			_err_msg_="Could not rollback SAN snapshot"
+			abort_script "$_err_msg_"
+		fi
+		$ECHO "\n RollbackStage $NEXT_STAGE completed at `$DATE +%d.%m.%y_%H:%M:%S`" | $TEE -a ${LOGFILE}
+		$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+		$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+	else
+		$ECHO "\n Rollback Stage $NEXT_STAGE not required for ${CURR_SERVER_TYPE} `$DATE +%d.%m.%y_%H:%M:%S`" | $TEE -a ${LOGFILE}
+		$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+		$ECHO "=========================================================================" | $TEE -a ${LOGFILE}	
+	fi
+fi	
+set_next_stage 4
+rollback_snapshots
+}
+
+#rollback_stage_4 
+#rollback_nas_snapshots
+# Arguments: 
+#   SNAP_NAME
+# Return Values:
+#   none
+rollback_stage_4 ()
+{
+get_next_stage
+# If we read done from the stagefile
+if [ "${NEXT_STAGE}" != "4" ]; then
+    if [ "${NEXT_STAGE}" = "done" ]; then
+        _err_msg_="Current rollback seems to be completed"
+    else
+        _err_msg_="Current rollback seems to be at stage ${NEXT_STAGE}"
+    fi
+    abort_script "$_err_msg_"
+else
+    $ECHO "\n Calling NAS snapshot for NAS Rollback at `$DATE +%d.%m.%y_%H:%M:%S`" | $TEE -a ${LOGFILE}	
+fi
+if [ "${STORAGE_TYPE}" != "zfs" ]; then
+	if [ "${CURR_SERVER_TYPE}" == "stats_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_stats" -o "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_events" ]; then
+		#disable nasd prior to next rollback
+		smf_list=" ${NASd_SMF_ID} "
+		for _smf_ in ${smf_list}; do
+			$SVCADM clear ${_smf_} >> /dev/null 2>&1
+			$SVCADM disable -s ${_smf_} >> /dev/null 2>&1
+		done
+		if [ ! "${NO_CONFIRM}" ]; then
+			${BASH} $ENIQ_BKUP_DIR/$NAS_SNAP -a rollback -f ALL -n ${SNAP_NAME} -l ${LOGFILE}
+		else
+			${BASH} $ENIQ_BKUP_DIR/$NAS_SNAP -a rollback -f ALL -n ${SNAP_NAME} -l ${LOGFILE} -N
+		fi
+		if [ $? -ne 0 ]; then
+			_err_msg_="Could not rollback NAS snapshot"
+			abort_script "$_err_msg_"
+		fi
+		log_msg -s "Successfully rolled-back NAS snapshot with label ${SNAP_NAME}" ${_log_id_str}
+
+		$ECHO "\nRestore Stage $NEXT_STAGE completed at `$DATE +%d.%m.%y_%H:%M:%S`" | $TEE -a ${LOGFILE}
+		$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+		$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+	else
+		$ECHO "\nRestore Stage $NEXT_STAGE not required for ${CURR_SERVER_TYPE} `$DATE +%d.%m.%y_%H:%M:%S`" | $TEE -a ${LOGFILE}
+		$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+		$ECHO "=========================================================================" | $TEE -a ${LOGFILE}		
+	fi
+fi
+#Removing newly created NAS file system
+${BASH} cd /eniq/installation/core_install/templates/events/admin/bin
+${BASH} /usr/bin/bash manage_storage_fs.bsh -r /eniq/installation
+	
+#Enable NASd to mount all the NAS filesystems
+$SVCADM clear ${NASd_SMF_ID} >> /dev/null 2>&1
+$SVCADM enable -s ${NASd_SMF_ID} >> /dev/null 2>&1
+
+#Need to make sure the NAS Milestone comes online
+_service_state_=`$SVCS -a | $EGREP "${NAS_MILESTONE_SMF_ID}" | $AWK '{print $1}'`
+$ECHO "`$DATE +%d.%m.%y_%H:%M:%S` - Please wait while the NAS milestone comes online...\n" | $TEE -a ${LOGFILE}
+#log_msg -s "Successfully listed NAS snapshots with label ${SNAP_NAME}" ${_log_id_str}
+while [ "${_service_state_}" != "online" ]; do
+	$SLEEP 2
+	_service_state_=`$SVCS -a | $EGREP "${NAS_MILESTONE_SMF_ID}" | $AWK '{print $1}'`
+done	
+set_next_stage 5
+rollback_snapshots
+}
+
+### Function: rollback_stage_5 ###
+#
+# Restore event dbs etc.
+#
+# Arguments:
+#
+# Return Values:
+#   none
+rollback_stage_5()
+{
+get_next_stage
+# If we read done from the stagefile
+if [ "${NEXT_STAGE}" != "5" ]; then
+    if [ "${NEXT_STAGE}" = "done" ]; then
+        _err_msg_="Current rollback seems to be completed"
+    else
+        _err_msg_="Current rollback seems to be at stage ${NEXT_STAGE}"
+    fi
+    abort_script "$_err_msg_"
+else
+    $ECHO "\n Starting to restore events dbs and repdb etc. `$DATE +%d.%m.%y_%H:%M:%S`" | $TEE -a ${LOGFILE}	
+fi
+
+if [ "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_events" ]; then
+	$ECHO "`$DATE +%d.%m.%y_%H:%M:%S` - Rollback the Archive Data\n" | $TEE -a ${LOGFILE}
+	${BASH} $ENIQ_BKUP_DIR/$ROLLBACK_ARCHIVE  -N -l ${LOGFILE}
+	if [ $? -ne 0 ]; then
+		_err_msg_="Could not rollback archive data"
+		abort_script "$_err_msg_"
+	fi
+	$ECHO "`$DATE +%d.%m.%y_%H:%M:%S` - Restoring Open LDAP Database\n" | $TEE -a ${LOGFILE}
+	$BASH $ENIQ_BKUP_DIR/$OPENLDAP_BACKUP restore ${ENIQ_BASE_DIR}/backup/ldap.bkp
+	if [ $? -ne 0 ]; then
+		_err_msg_="Could not Restore the LDAP Database"
+		abort_script "$_err_msg_"
+	fi
+	$SVCADM enable -rst opendj
+fi
+if	[ "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_events"  -o "${CURR_SERVER_TYPE}" == "stats_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_stats" ]; then
+	#Restore the Repository Database
+	$ECHO "\n`$DATE +%d.%m.%y_%H:%M:%S` - Restoring the Repository Database\n" | $TEE -a ${LOGFILE}
+	$SU - ${SYSUSER} -c "$BASH $ENIQ_BKUP_DIR/$REPDB_RESTORE -c ${CLI_CONF_DIR}"
+	if [ $? -ne 0 ]; then
+		_err_msg_="Could not Restore Repository Database"
+		abort_script "$_err_msg_"
+	fi
+	#Check if service sentinel is already started ,if not then start sentinel
+	_smf_list_="${SENTINEL_SMF_ID}"
+    for _smf_ in ${_smf_list_}; do
+        $ECHO "Enabling service ${_smf_}" | $TEE -a ${LOGFILE}
+        $SVCADM clear ${_smf_} >> /dev/null 2>&1
+        $SVCADM enable -s ${_smf_} >> /dev/null 2>&1
+		if [ $? -ne 0 ]; then
+		_err_msg_="\n Failed to start ${SENTINEL_SMF_ID} \n "
+		abort_script "$_err_msg_"
+		fi
+	done 
+fi
+if [ "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_events" ]; then	
+
+	
+	#Onlining the License Manager, repdb and Mediation Gateway
+	$ECHO "Starting the repdb,dwhdb and engine ENIQ services " | $TEE -a ${LOGFILE}
+	$BASH ${ENIQ_ADMIN_DIR}/bin/manage_eniq_services.bsh -a start -s licmgr,repdb,controlzone -N -l ${LOGFILE}
+	if [ $? -ne 0 ]; then
+		_err_msg_="Failed to start ENIQ licmgr,repdb,controlzone services."
+		abort_script "$_err_msg_"
+	fi 
+	$SLEEP 120
+fi
+# On the Mediation Blade(s) online ec service
+if	[ "${CURR_SERVER_TYPE}" == "eniq_mz" ]; then
+   $ECHO "Starting ec ENIQ services " | $TEE -a ${LOGFILE}
+   $BASH ${ENIQ_ADMIN_DIR}/bin/manage_eniq_services.bsh -a start -s ec -N -l ${LOGFILE}
+   if [ $? -ne 0 ]; then
+		_err_msg_="Failed to start ENIQ ec services."
+		abort_script "$_err_msg_"
+	fi 
+fi
+if [ "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_events" ]; then
+	# Restore the Mediation Derby database
+	$ECHO "\n`$DATE +%d.%m.%y_%H:%M:%S` - Restoring up the Mediation Zone Derby database\n" | $TEE -a ${LOGFILE}
+	$SU - ${SYSUSER} -c "$MEDIATION_INTER/bin/mg_derbydb_restore.sh" 
+	if [ $? -ne 0 ]; then
+		_err_msg_="Could not Restore the Mediation Derby Database"
+		abort_script "$_err_msg_"
+	fi
+	$ECHO "\nRestore Stage $NEXT_STAGE completed at `$DATE +%d.%m.%y_%H:%M:%S`" | $TEE -a ${LOGFILE}
+	$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+	$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+fi	
+set_next_stage 6
+rollback_snapshots	
+}
+
+### Function: rollback_stage_6 ###
+#
+# Recovering sybase iq and starting services
+#
+# Arguments:
+#
+# Return Values:
+#   none
+rollback_stage_6()
+{
+get_next_stage
+# If we read done from the stagefile
+#if [ "${NEXT_STAGE}" != "6" -a ! "${FORCE_RESTORE}" ]; then
+if [ "${NEXT_STAGE}" != "6" ]; then
+	if [ "${NEXT_STAGE}" = "done" ]; then
+        _err_msg_="Current rollback seems to be completed"
+    else
+        _err_msg_="Current rollback seems to be at stage ${NEXT_STAGE}"
+    fi
+    abort_script "$_err_msg_"
+else
+    $ECHO "\n Starting run recover sybase IQ `$DATE +%d.%m.%y_%H:%M:%S` \n" | $TEE -a ${LOGFILE}	
+fi
+#Recovering Sybase IQ
+if [ "${CURR_SERVER_TYPE}" == "stats_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_stats" -o "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_events" ]; then
+	$ECHO "Starting repdb ENIQ services " | $TEE -a ${LOGFILE}
+   $BASH ${ENIQ_ADMIN_DIR}/bin/manage_eniq_services.bsh -a start -s repdb -N -l ${LOGFILE}
+   if [ $? -ne 0 ]; then
+		_err_msg_="Failed to start ENIQ repdb service."
+		abort_script "$_err_msg_"
+	fi 
+	$ECHO "\n`$DATE +%d.%m.%y_%H:%M:%S` - Recovering Sybase IQ\n" | $TEE -a ${LOGFILE}
+	$BASH $ENIQ_BKUP_DIR/recover_iq.bsh -N -l ${LOGFILE}
+	if [ $? -ne 0 ]; then
+		_err_msg_="Could not Recover Sybase IQ"
+		abort_script "$_err_msg_"
+	fi 
+fi
+
+$ECHO "Starting  all the ENIQ services " | $TEE -a ${LOGFILE}
+$BASH ${ENIQ_ADMIN_DIR}/bin/manage_eniq_services.bsh -a start -s ALL -N -l ${LOGFILE}
+	if [ $? -ne 0 ]; then
+		_err_msg_="Failed to start ENIQ  services."
+		abort_script "$_err_msg_"
+	fi 
+$SLEEP 60	
+# Enable required services
+if [ "${INSTALL_TYPE}" == "events" ]; then
+    if [ "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_events" ]; then
+		smf_list="${DDC_SMF_ID}  ${OPEN_LDAP_SMF_ID} ${HOSTSYNC_SMF_ID}"
+	else
+		smf_list="${DDC_SMF_ID} ${HOSTSYNC_SMF_ID} "
+	fi
+fi
+
+for _smf_ in ${smf_list}; do
+    $ECHO "Enabling service ${_smf_}" | $TEE -a ${LOGFILE}
+    $SVCADM clear ${_smf_} >> /dev/null 2>&1
+    $SVCADM enable -s ${_smf_} >> /dev/null 2>&1
+done
+#Enabling workflows for event standalone and coordinator
+if [ "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "eniq_events" ]; then
+	$ECHO "\n`$DATE +%d.%m.%y_%H:%M:%S` - Enabling workflows \n" | $TEE -a ${LOGFILE}
+	$SU - ${SYSUSER} -c "$MEDIATION_INTER/bin/mg_quiesce_off.sh"
+	if [ $? -ne 0 ]; then
+		_err_msg_="Could not enable workflows"
+		abort_script "$_err_msg_"
+	fi
+fi
+#Remove any unwanted newly created NAS and ZFS filesystems 
+#$ECHO "\n`$DATE +%d.%m.%y_%H:%M:%S` - Removing any unwanted ZFS and NAS file systems \n" | $TEE -a ${LOGFILE}
+#${BASH} $ENIQ_BKUP_DIR/$POST_ROLLBACK
+#if [ $? -ne 0 ]; then
+#		_err_msg_="Could not run post rollback step of removal of unwanted ZFS/NAS file system"
+#		abort_script "$_err_msg_"
+#fi
+set_next_stage done
+$ECHO "\n`$DATE +%d.%m.%y_%H:%M:%S` - Rollback finished successfully ,Now please run post rollback script as mentioned in CPI\n" | $TEE -a ${LOGFILE}	
+}
+
+### Function: set_next_stage ###
+#
+# Set up the stage to be run
+#
+# Arguments:
+#   $1 : Stage to be set to. Either numeric value or 'done'
+# Return Values:
+#   none
+set_next_stage()
+{
+_stage_time_=`$DATE '+%Y-%b-%d_%H.%M.%S'`
+$ECHO "# Setting new stage at $_stage_time_" > ${STAGEFILE} | $TEE -a ${LOGFILE}
+$ECHO "${1}" >> ${STAGEFILE} | $TEE -a ${LOGFILE}
+}
+
+### Function: setup_env ###
+#
+# Setup up path environment etc
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+setup_env()
+{
+ENIQ_BASE_DIR=/eniq
+ENIQ_ADMIN_DIR=${ENIQ_BASE_DIR}/admin
+ENIQ_BKUP_DIR=${ENIQ_BASE_DIR}/bkup_sw/bin
+ENIQ_CONF_DIR=${ENIQ_BASE_DIR}/installation/config
+# File to hold stage information for rollback for co-ordinator/standalone server only
+STAGEFILE=/var/tmp/rollback_stage
+# Mediation Inter directory
+MEDIATION_INTER=${ENIQ_BASE_DIR}/mediation_inter
+# ENIQ SW conf
+CLI_CONF_DIR=${ENIQ_BASE_DIR}/sw/conf
+LOGDIR="/eniq/local_logs/backup_logs"
+DEF_LOGFILE="${LOGDIR}/manage_snapshots.log"
+# Nmber of stages in Rollback
+NUM_ROLL_STAGE=6
+# Source the common functions
+if [ -s ${ENIQ_BASE_DIR}/installation/core_install/lib/common_functions.lib ]; then
+    . ${ENIQ_BASE_DIR}/installation/core_install/lib/common_functions.lib
+else
+       _err_msg_="File ${ENIQ_BASE_DIR}/installation/core_install/lib/common_functions.lib  not found"
+        abort_script "$_err_msg_"
+fi
+if [ -s ${ENIQ_BASE_DIR}/installation/core_install/lib/common_inirator_functions.lib ]; then
+    . ${ENIQ_BASE_DIR}/installation/core_install/lib/common_inirator_functions.lib
+else
+        _err_msg_="File ${ENIQ_BASE_DIR}/installation/core_install/lib/common_inirator_functions.lib not found"
+        abort_script "$_err_msg_"
+fi
+
+SYSUSER=`iniget ENIQ_INSTALL_CONFIG -f ${ENIQ_CONF_DIR}/${SUNOS_INI} -v ENIQ_SYSUSER`
+if [ ! "${SYSUSER}" ]; then
+    _err_msg_="Could not read System User from ${ENIQ_CONF_DIR}/${SUNOS_INI}"
+    abort_script "$_err_msg_"
+fi  
+SYSGRP=`$ID ${SYSUSER}|$NAWK '{print $2}'|$NAWK -F\( '{print $2}'|$NAWK -F\) '{print $1}'`
+if [ ! "${SYSGRP}" ]; then
+    _err_msg_="Could not determine group id of ${SYSUSER}"
+    abort_script "$_err_msg_"
+fi
+
+BKUP_CONF_FILE="`$DIRNAME ${SCRIPTHOME}`/etc/eniq_backup.conf"
+if [ ! -s ${BKUP_CONF_FILE} ]; then
+    _err_msg_="Could not locate file ${BKUP_CONF_FILE}"
+    abort_script "$_err_msg_"
+fi
+SNAP_ID_STR=`$CAT ${BKUP_CONF_FILE} | $EGREP '^[ 	]*ROLL_SNAP_ID_STR=' | $NAWK -F"=" '{print $2}'`
+if [ ! "${SNAP_ID_STR}" ]; then
+    _err_msg_="Could not read SNAP_ID_STR param from ${BKUP_CONF_FILE}"
+    abort_script "$_err_msg_"
+fi
+
+CURR_SERVER_TYPE=`$CAT $ENIQ_CONF_DIR/installed_server_type | $GEGREP -v '^[[:blank:]]*#' | $SED -e 's/ //g'`
+if [ ! "${CURR_SERVER_TYPE}" ]; then
+    _err_msg_="Could not determine which server type this is"
+    abort_script "$_err_msg_"
+fi
+HOME="/"
+export HOME
+
+}
+
+### Function: usage_msg ###
+#
+#   Print out the usage message
+#
+# Arguments:
+#       none
+# Return Values:
+#       none
+usage_msg()
+{
+$ECHO "
+Usage: `$BASENAME $0` -a <snap_action> [-s <storage type>] [-S <rollback stage>][ -n <snap_name> ] [ -l <logfile> ]
+
+options:
+
+-a  : Snapshot Action. Must be either
+        create   --> Create a snapshot of all filesystems
+        delete   --> Delete specified snapshot(s).
+        list     --> List of ALL/matching snapshot(s)
+        rollback --> Roll back to specified snapshot.
+
+-n  : <snap_label> 
+		In the case of snapshot rollback, specify a name or label that each snapshot will use. e.g. -n snap1 .
+		In the case of delete snapshot specify label otherwise it will delete all snaps on the system. 
+        In the case of list snapshot specify the snap name that is required to be listed.
+		In the case of create snapshot it will not be required and snap str will be used from backup.conf file. 
+-l  : 	Optional parameter specifying the full path to logfile. If not specified, a
+		logfile will be created in ${LOGFILE}
+-N  : 	Optional parameter for specifying no confirm
+
+Note: 	Due to any reason ,in the middle of rollback if you want to start rollback alaover again 
+		then remove $STAGEFILE and start the script again.
+"
+}
+
+### Function: user_confirm ###
+#
+# Get confirmation from user to proceed with snapshot action
+#
+# Arguments:
+#       none
+# Return Values:
+#       none
+user_confirm()
+{
+while :; do
+    unset USER_CONF
+    $CLEAR
+    $CAT ${TEM_DIR}/san_list
+    $ECHO "\nAre you sure you wish to ${1} above"
+    $ECHO "Enter [Yes | No] (case sensitive) : \c"
+
+    read USER_CONF
+    if [ "$USER_CONF" == "Yes" -o "$USER_CONF" == "No" ]; then
+        break
+    fi
+done
+
+}
+
+# ********************************************************************
+#
+#   Main body of program
+#
+# ********************************************************************
+#
+RUN_TIME=`$DATE '+%Y-%b-%d_%H.%M.%S'`
+
+# Determine absolute path to software
+get_absolute_path
+
+# Check that the effective id of the user is root
+check_id root
+
+while getopts ":a:Fl:n:Nq:" arg; do
+  case $arg in
+    a) SNAP_ACTION="$OPTARG"
+       ;;
+    F) SNAP_FORCE="YES"
+       ;;
+    l) LOGFILE="$OPTARG"
+       ;;
+    n) SNAP_NAME="$OPTARG"
+       ;;
+    N) NO_CONFIRM="YES"
+       ;;
+    q) SNAP_QUIET="-q"
+       ;;	  
+   \?) usage_msg
+       exit 1
+       ;;
+  esac
+done
+shift `expr $OPTIND - 1`
+
+# Setup up path environment etc
+setup_env
+# get eniq server info
+get_server_info
+
+
+# Set up default logfile if required
+if [ ! "${LOGFILE}" ]; then
+    LOGFILE="${DEF_LOGFILE}"
+fi
+
+# Check Input Params
+check_params
+
+# Check to make sure all the snapshot scripts exist
+chk_scripts_exist
+
+
+# Check/Create Logfile
+chk_create_logfile
+
+log_msg -s "\n--------------------------------------------------------" ${_log_id_str} ${SNAP_QUIET}
+log_msg -s "${RUN_TIME} - Starting to ${SNAP_ACTION} snapshots " ${_log_id_str} ${SNAP_QUIET}
+log_msg -s "---------------------------------------------------------" ${_log_id_str} ${SNAP_QUIET}
+
+# Create a temporary Directory
+TEM_DIR=/var/tmp/manage_snapshots.$$.$$
+$RM -rf ${TEM_DIR}
+$MKDIR -p ${TEM_DIR}
+if [ $? -ne 0 ]; then
+    _err_msg_="Could not create directory ${TEM_DIR}"
+    abort_script "$_err_msg_"
+fi
+
+$CHMOD 777 ${TEM_DIR}
+	
+case "${SNAP_OPT}" in
+    snapshot)
+    create_snapshots
+        ;;
+
+    destroy)
+    destroy_snapshots
+        ;;
+
+    list)
+    list_snapshots
+        ;;
+
+    rollback)
+    rollback_snapshots
+	
+        ;;
+    *)  : # SHOULD NOT GET HERE
+       ;;
+esac
+
+$RM -rf ${TEM_DIR}
+if [ -s ${STAGEFILE} ]; then
+	$RM $STAGEFILE
+fi
+exit 0
+
